@@ -223,6 +223,16 @@ impl AnimationPlayer {
     /// Start playing an animation, resetting state of the player, unless the requested animation is already playing.
     /// If `transition_duration` is set, this will use a linear blending
     /// between the previous and the new animation to make a smooth transition
+    pub fn stop(&mut self, handle: Handle<AnimationClip>) -> &mut Self {
+        if let Some(clip_index) = self.clip_index(&handle) {
+            self.animations.remove(clip_index);
+        }
+        self
+    }
+
+    /// Start playing an animation, resetting state of the player, unless the requested animation is already playing.
+    /// If `transition_duration` is set, this will use a linear blending
+    /// between the previous and the new animation to make a smooth transition
     pub fn play(&mut self, handle: Handle<AnimationClip>) -> &mut Self {
         self.clip_index(&handle)
             .map(|clip_index| self.move_clip_to_end(clip_index))
