@@ -168,12 +168,15 @@ pub struct AnimationPlayer {
 }
 
 impl AnimationPlayer {
-    fn is_clip_playing(&self, handle: &Handle<AnimationClip>) -> bool {
-        !self.is_paused()
-            && self
-                .animations
-                .iter()
-                .any(|anim| anim.animation_clip == *handle)
+    fn clip_index(&self, handle: &Handle<AnimationClip>) -> Option<usize> {
+        self.animations
+            .iter()
+            .position(|anim| anim.animation_clip == *handle)
+    }
+
+    fn move_clip_to_end(&mut self, clip_index: usize) {
+        let idx = self.animations.len() - 1;
+        self.animations.swap(clip_index, idx);
     }
 
     /// Start playing an animation, resetting state of the player
@@ -221,9 +224,11 @@ impl AnimationPlayer {
     /// If `transition_duration` is set, this will use a linear blending
     /// between the previous and the new animation to make a smooth transition
     pub fn play(&mut self, handle: Handle<AnimationClip>) -> &mut Self {
-        if !self.is_clip_playing(&handle) {
-            self.start(handle);
-        }
+        self.clip_index(&handle)
+            .map(|clip_index| self.move_clip_to_end(clip_index))
+            .unwrap_or_else(|| {
+                self.start(handle);
+            });
         self
     }
     /// Start playing an animation, resetting state of the player, unless the requested animation is already playing.
@@ -235,14 +240,17 @@ impl AnimationPlayer {
         mask: Mask,
         weight: f32,
     ) -> &mut Self {
-        if !self.is_clip_playing(&handle) {
-            self.animations.push(PlayingAnimation {
-                animation_clip: handle,
-                mask: Some(mask),
-                weight,
-                ..Default::default()
+        self.clip_index(&handle)
+            .map(|clip_index| self.move_clip_to_end(clip_index))
+            .unwrap_or_else(|| {
+                self.animations.push(PlayingAnimation {
+                    animation_clip: handle,
+                    mask: Some(mask),
+                    weight,
+                    ..Default::default()
+                });
             });
-        }
+
         self
     }
 
@@ -253,9 +261,11 @@ impl AnimationPlayer {
         handle: Handle<AnimationClip>,
         transition_duration: Duration,
     ) -> &mut Self {
-        if !self.is_clip_playing(&handle) {
-            self.start_with_transition(handle, transition_duration);
-        }
+        self.clip_index(&handle)
+            .map(|clip_index| self.move_clip_to_end(clip_index))
+            .unwrap_or_else(|| {
+                self.start_with_transition(handle, transition_duration);
+            });
         self
     }
 
