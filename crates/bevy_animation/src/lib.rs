@@ -13,7 +13,10 @@ use bevy_hierarchy::{Children, Parent};
 use bevy_math::{Quat, Vec3};
 use bevy_reflect::{FromReflect, Reflect, TypeUuid};
 use bevy_time::Time;
-use bevy_transform::{prelude::Transform, TransformSystem};
+use bevy_transform::{
+    prelude::{GlobalTransform, Transform},
+    TransformSystem,
+};
 use bevy_utils::{tracing::warn, HashMap};
 
 #[allow(missing_docs)]
@@ -44,6 +47,11 @@ pub struct VariableCurve {
     pub keyframe_timestamps: Vec<f32>,
     /// List of the keyframes.
     pub keyframes: Keyframes,
+}
+
+#[derive(Reflect)]
+pub enum Mask {
+    Step(f32),
 }
 
 /// Path to an entity, with [`Name`]s. Each entity in a path must have a name.
@@ -107,18 +115,21 @@ impl AnimationClip {
     }
 }
 
-#[derive(Reflect)]
 struct PlayingAnimation {
     repeat: bool,
     speed: f32,
     elapsed: f32,
     animation_clip: Handle<AnimationClip>,
+    weight: f32,
+    mask: Option<Mask>,
     path_cache: Vec<Vec<Option<Entity>>>,
 }
 
 impl Default for PlayingAnimation {
     fn default() -> Self {
         Self {
+            weight: 1.0,
+            mask: None,
             repeat: false,
             speed: 1.0,
             elapsed: 0.0,
@@ -144,7 +155,8 @@ struct AnimationTransition {
 pub struct AnimationPlayer {
     paused: bool,
 
-    animation: PlayingAnimation,
+    #[reflect(ignore)]
+    animations: Vec<PlayingAnimation>,
 
     // List of previous animations we're currently transitioning away from.
     // Usually this is empty, when transitioning between animations, there is
@@ -156,13 +168,21 @@ pub struct AnimationPlayer {
 }
 
 impl AnimationPlayer {
+    fn is_clip_playing(&self, handle: &Handle<AnimationClip>) -> bool {
+        !self.is_paused()
+            && self
+                .animations
+                .iter()
+                .any(|anim| anim.animation_clip == *handle)
+    }
+
     /// Start playing an animation, resetting state of the player
     /// This will use a linear blending between the previous and the new animation to make a smooth transition
     pub fn start(&mut self, handle: Handle<AnimationClip>) -> &mut Self {
-        self.animation = PlayingAnimation {
+        self.animations.push(PlayingAnimation {
             animation_clip: handle,
             ..Default::default()
-        };
+        });
 
         // We want a hard transition.
         // In case any previous transitions are still playing, stop them
@@ -178,20 +198,21 @@ impl AnimationPlayer {
         handle: Handle<AnimationClip>,
         transition_duration: Duration,
     ) -> &mut Self {
-        let mut animation = PlayingAnimation {
+        let animation = PlayingAnimation {
             animation_clip: handle,
             ..Default::default()
         };
-        std::mem::swap(&mut animation, &mut self.animation);
+        self.animations.push(animation);
+        // std::mem::swap(&mut animation, &mut self.animation);
 
         // Add the current transition. If other transitions are still ongoing,
         // this will keep those transitions running and cause a transition between
         // the output of that previous transition to the new animation.
-        self.transitions.push(AnimationTransition {
-            current_weight: 1.0,
-            weight_decline_per_sec: 1.0 / transition_duration.as_secs_f32(),
-            animation,
-        });
+        // self.transitions.push(AnimationTransition {
+        //     current_weight: 1.0,
+        //     weight_decline_per_sec: 1.0 / transition_duration.as_secs_f32(),
+        //     animation,
+        // });
 
         self
     }
@@ -200,8 +221,27 @@ impl AnimationPlayer {
     /// If `transition_duration` is set, this will use a linear blending
     /// between the previous and the new animation to make a smooth transition
     pub fn play(&mut self, handle: Handle<AnimationClip>) -> &mut Self {
-        if self.animation.animation_clip != handle || self.is_paused() {
+        if !self.is_clip_playing(&handle) {
             self.start(handle);
+        }
+        self
+    }
+    /// Start playing an animation, resetting state of the player, unless the requested animation is already playing.
+    /// If `transition_duration` is set, this will use a linear blending
+    /// between the previous and the new animation to make a smooth transition
+    pub fn play_with_mask(
+        &mut self,
+        handle: Handle<AnimationClip>,
+        mask: Mask,
+        weight: f32,
+    ) -> &mut Self {
+        if !self.is_clip_playing(&handle) {
+            self.animations.push(PlayingAnimation {
+                animation_clip: handle,
+                mask: Some(mask),
+                weight,
+                ..Default::default()
+            });
         }
         self
     }
@@ -213,7 +253,7 @@ impl AnimationPlayer {
         handle: Handle<AnimationClip>,
         transition_duration: Duration,
     ) -> &mut Self {
-        if self.animation.animation_clip != handle || self.is_paused() {
+        if !self.is_clip_playing(&handle) {
             self.start_with_transition(handle, transition_duration);
         }
         self
@@ -221,13 +261,19 @@ impl AnimationPlayer {
 
     /// Set the animation to repeat
     pub fn repeat(&mut self) -> &mut Self {
-        self.animation.repeat = true;
+        let animation = self.animations.last_mut();
+        if let Some(animation) = animation {
+            animation.repeat = true;
+        }
         self
     }
 
     /// Stop the animation from repeating
     pub fn stop_repeating(&mut self) -> &mut Self {
-        self.animation.repeat = false;
+        let animation = self.animations.last_mut();
+        if let Some(animation) = animation {
+            animation.repeat = false;
+        }
         self
     }
 
@@ -248,23 +294,35 @@ impl AnimationPlayer {
 
     /// Speed of the animation playback
     pub fn speed(&self) -> f32 {
-        self.animation.speed
+        self.animations
+            .last()
+            .map(|anim| anim.speed)
+            .unwrap_or_default()
     }
 
     /// Set the speed of the animation playback
     pub fn set_speed(&mut self, speed: f32) -> &mut Self {
-        self.animation.speed = speed;
+        let animation = self.animations.last_mut();
+        if let Some(animation) = animation {
+            animation.speed = speed;
+        }
         self
     }
 
     /// Time elapsed playing the animation
     pub fn elapsed(&self) -> f32 {
-        self.animation.elapsed
+        self.animations
+            .last()
+            .map(|anim| anim.elapsed)
+            .unwrap_or_default()
     }
 
     /// Seek to a specific time in the animation
     pub fn set_elapsed(&mut self, elapsed: f32) -> &mut Self {
-        self.animation.elapsed = elapsed;
+        let animation = self.animations.last_mut();
+        if let Some(animation) = animation {
+            animation.elapsed = elapsed;
+        }
         self
     }
 }
@@ -341,12 +399,21 @@ pub fn animation_player(
     children: Query<&Children>,
     names: Query<&Name>,
     transforms: Query<&mut Transform>,
+    global_transforms: Query<&GlobalTransform>,
     parents: Query<(Option<With<AnimationPlayer>>, Option<&Parent>)>,
     mut animation_players: Query<(Entity, Option<&Parent>, &mut AnimationPlayer)>,
 ) {
     animation_players
         .par_iter_mut()
         .for_each_mut(|(root, maybe_parent, mut player)| {
+            player.animations.retain(|anim| {
+                if let Some(animation_clip) = animations.get(&anim.animation_clip) {
+                    anim.elapsed < animation_clip.duration || anim.repeat
+                } else {
+                    true
+                }
+            });
+
             update_transitions(&mut player, &time);
             run_animation_player(
                 root,
@@ -355,6 +422,7 @@ pub fn animation_player(
                 &animations,
                 &names,
                 &transforms,
+                &global_transforms,
                 maybe_parent,
                 &parents,
                 &children,
@@ -370,6 +438,7 @@ fn run_animation_player(
     animations: &Assets<AnimationClip>,
     names: &Query<&Name>,
     transforms: &Query<&mut Transform>,
+    global_transforms: &Query<&GlobalTransform>,
     maybe_parent: Option<&Parent>,
     parents: &Query<(Option<With<AnimationPlayer>>, Option<&Parent>)>,
     children: &Query<&Children>,
@@ -380,21 +449,23 @@ fn run_animation_player(
     if paused && !player.is_changed() {
         return;
     }
-
-    // Apply the main animation
-    apply_animation(
-        1.0,
-        &mut player.animation,
-        paused,
-        root,
-        time,
-        animations,
-        names,
-        transforms,
-        maybe_parent,
-        parents,
-        children,
-    );
+    for animation in &mut player.animations {
+        // Apply the main animation
+        apply_animation(
+            animation.weight,
+            animation,
+            paused,
+            root,
+            time,
+            animations,
+            names,
+            transforms,
+            global_transforms,
+            maybe_parent,
+            parents,
+            children,
+        );
+    }
 
     // Apply any potential fade-out transitions from previous animations
     for AnimationTransition {
@@ -412,6 +483,7 @@ fn run_animation_player(
             animations,
             names,
             transforms,
+            global_transforms,
             maybe_parent,
             parents,
             children,
@@ -421,7 +493,7 @@ fn run_animation_player(
 
 #[allow(clippy::too_many_arguments)]
 fn apply_animation(
-    weight: f32,
+    base_weight: f32,
     animation: &mut PlayingAnimation,
     paused: bool,
     root: Entity,
@@ -429,6 +501,7 @@ fn apply_animation(
     animations: &Assets<AnimationClip>,
     names: &Query<&Name>,
     transforms: &Query<&mut Transform>,
+    global_transforms: &Query<&GlobalTransform>,
     maybe_parent: Option<&Parent>,
     parents: &Query<(Option<With<AnimationPlayer>>, Option<&Parent>)>,
     children: &Query<&Children>,
@@ -469,6 +542,23 @@ fn apply_animation(
             // to run their animation. Any players in the children or descendants will log a warning
             // and do nothing.
             let Ok(mut transform) = (unsafe { transforms.get_unchecked(target) }) else { continue };
+
+            let Ok(entity_global_transform) = (unsafe { global_transforms.get_unchecked(root) }) else { continue };
+            let Ok(target_global_transform) = (unsafe { global_transforms.get_unchecked(target) }) else { continue };
+
+            let weight = if let Some(mask) = &animation.mask {
+                match mask {
+                    Mask::Step(value) => {
+                        let rel = target_global_transform.translation().y
+                            - entity_global_transform.translation().y;
+
+                        ((rel - *value) * 2.5).min(base_weight).max(0.)
+                    }
+                }
+            } else {
+                base_weight
+            };
+
             for curve in curves {
                 // Some curves have only one keyframe used to set a transform
                 if curve.keyframe_timestamps.len() == 1 {
